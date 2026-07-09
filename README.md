@@ -162,6 +162,42 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ctb
 ```
 
+## Logging & debug mode
+
+Logs go to **stderr** by default (journald captures them if you use systemd).
+
+| Mode | Command | What you see |
+|------|---------|----------------|
+| Normal | `ctb serve` | Each HTTP request/response, auth failures, Telegram send/wait/reply **previews**, timeouts, errors |
+| Verbose | `ctb -v serve` | DEBUG details (ignored TG messages, aggregation, etc.) without full message bodies |
+| **Debug** | `ctb serve --debug` | Full request bodies, full Telegram outbound + agent replies, uvicorn access log, and a file log |
+| Custom file | `ctb serve --log-file /var/log/ctb.log` | Same as current level, also append to that path |
+
+With `--debug`, logs are also written to:
+
+```text
+~/.config/completion-telegram-bridge/bridge.debug.log
+```
+
+(unless you pass `--log-file`).
+
+Examples:
+
+```bash
+# watch live
+ctb serve --debug
+
+# systemd / background: tail the debug file
+tail -f ~/.config/completion-telegram-bridge/bridge.debug.log
+
+# production-ish: INFO + persistent file
+ctb serve --log-file /var/log/ctb/bridge.log
+```
+
+Each completion gets a short **request id** (e.g. `id=a1b2c3d4`) on every related log line so you can follow one glasses request end-to-end.
+
+**Note:** debug mode logs full prompts and agent answers (personal content). Use only while troubleshooting; bearer tokens are redacted.
+
 ## Smoke test
 
 ```bash

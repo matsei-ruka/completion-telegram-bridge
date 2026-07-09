@@ -25,6 +25,7 @@ from completion_telegram_bridge.config import (
     save_config,
     update_config,
 )
+from completion_telegram_bridge.logging_setup import setup_logging
 
 app = typer.Typer(
     name="ctb",
@@ -34,14 +35,8 @@ app = typer.Typer(
 )
 console = Console()
 
-
-def _setup_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+# Set by global callback; serve may escalate to --debug
+_CLI_VERBOSE = False
 
 
 def _session_base(cfg: BridgeConfig) -> str:
@@ -60,9 +55,16 @@ def _session_file_exists(cfg: BridgeConfig) -> bool:
 
 @app.callback()
 def main_callback(
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Verbose logs (DEBUG level, previews only — use serve --debug for full bodies)",
+    ),
 ) -> None:
-    _setup_logging(verbose)
+    global _CLI_VERBOSE
+    _CLI_VERBOSE = verbose
+    setup_logging(verbose=verbose)
 
 
 @app.command("version")
@@ -385,17 +387,39 @@ def _require_session_ready(cfg: BridgeConfig) -> None:
 def serve_cmd(
     host: Optional[str] = typer.Option(None, "--host", help="Bind host (default from config)"),
     port: Optional[int] = typer.Option(None, "--port", help="Bind port (default from config)"),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        "-d",
+        help="Debug mode: full request/Telegram bodies, DEBUG logs, write bridge.debug.log",
+    ),
+    log_file: Optional[Path] = typer.Option(
+        None,
+        "--log-file",
+        help="Also write logs to this file (default in --debug: ~/.config/.../bridge.debug.log)",
+    ),
 ) -> None:
-    """Start the OpenAI-compatible HTTP bridge (bind localhost; put nginx in front)."""
+    """Start the OpenAI-compatible HTTP bridge (bind localhost; put nginx in front).
+
+    Logging:
+      ctb serve              INFO to stderr (request summary, send/reply previews, errors)
+      ctb -v serve           DEBUG without full message bodies
+      ctb serve --debug      full bodies + file log under config dir
+      ctb serve --log-file /var/log/ctb.log
+    """
     cfg = load_config()
     if host is not None:
         cfg.host = host
     if port is not None:
         cfg.port = port
-    # Persist overrides only if passed? Keep ephemeral for flags.
     from completion_telegram_bridge.server import run_server
 
-    run_server(cfg)
+    run_server(
+        cfg,
+        debug=debug,
+        verbose=_CLI_VERBOSE,
+        log_file=log_file,
+    )
 
 
 if __name__ == "__main__":
