@@ -310,7 +310,12 @@ def create_app(config: BridgeConfig, bridge: TelegramBridge) -> FastAPI:
             },
         }
 
+    # Even Hub / G2 may POST to the configured URL as-is. Observed in production:
+#   POST /v1  (base URL ending in /v1)
+# also support standard OpenAI paths and bare root.
     app.post("/v1/chat/completions")(chat_completions)
+    app.post("/chat/completions")(chat_completions)
+    app.post("/v1")(chat_completions)
     app.post("/")(chat_completions)
 
     return app

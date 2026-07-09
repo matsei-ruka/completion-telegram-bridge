@@ -102,7 +102,8 @@ Other commands:
 The service accepts:
 
 - `POST /v1/chat/completions`
-- `POST /` (alias)
+- `POST /v1` (Even Hub often posts here if URL is `…/v1`)
+- `POST /chat/completions` and `POST /` (aliases)
 - `GET /v1/models` (auth required)
 - `GET /healthz` (no auth)
 

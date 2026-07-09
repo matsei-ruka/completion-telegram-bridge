@@ -67,6 +67,8 @@ bridge returns OpenAI-shaped completion
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/v1/chat/completions` | Primary completion entrypoint |
+| `POST` | `/v1` | Alias — Even Hub often POSTs here when URL ends with `/v1` |
+| `POST` | `/chat/completions` | Alias |
 | `POST` | `/` | Alias of chat completions |
 | `GET` | `/v1/models` | Smoke / app probe |
 | `GET` | `/healthz` | Liveness (no auth) |
