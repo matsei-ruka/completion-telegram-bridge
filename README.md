@@ -2,77 +2,189 @@
 
 Bridge an [Even Realities G2](https://www.evenrealities.com/) custom agent (OpenAI-compatible completion API) to a personal agent that lives on Telegram.
 
-Even Realities G2 glasses can replace Even AI with a custom agent configured by:
-
-| Setting | Purpose |
-|---------|---------|
-| **Name** | Display name for the agent |
-| **URL** | Base URL of an OpenAI-format completions API |
-| **Token** | Bearer token for that API |
-
-This project implements that URL: an HTTP service that accepts OpenAI-style chat/completions requests, forwards the user message to your Telegram agent, waits for the reply, and returns it in the expected completion format.
-
-## Why
-
-Your personal agent already runs as a Telegram bot. The glasses cannot talk to Telegram directly; they only call a completion-style HTTP API. This bridge sits in the middle:
-
 ```
-Even Realities G2  →  OpenAI-compatible HTTP API (this service)  →  Telegram  →  your agent bot
-                         ←  wait for agent reply  ←  Telegram  ←
+Even Realities G2  →  HTTPS (nginx)  →  this service  →  Telegram  →  your agent bot
+                                              ←  wait for reply  ←
 ```
 
-## How it works (intended design)
-
-1. The glasses send a chat completion request (`POST .../v1/chat/completions` or equivalent) with the user’s prompt.
-2. The bridge authenticates the request (configured token).
-3. Using the **Telegram user API** (your own account, not the bot token of the agent), it sends the prompt as a message to the agent bot.
-4. The HTTP request **stays open** while the bridge waits for the agent’s reply on Telegram.
-5. When the agent responds, the bridge maps that text into an OpenAI-compatible completion response and returns it to the glasses.
-
-Keeping the completion request open for the full round-trip matches how Even AI–style agents are expected to behave: one HTTP call, one answer.
-
-## Goals
-
-- **Drop-in URL** for Even Realities G2 custom agent configuration
-- **OpenAI-compatible** request/response shape (chat completions)
-- **Telegram user session** to message an existing bot/agent
-- **Synchronous wait**: bridge holds the HTTP request until the agent replies (with sensible timeouts)
-- Simple configuration (env / config file): Telegram session, agent chat id, API token, listen address
-
-## Non-goals (for now)
-
-- Multi-user / multi-tenant hosting
-- Full OpenAI feature parity (streaming, tools, vision, embeddings, etc.) unless needed by the glasses
-- Replacing or rehosting the Telegram agent itself
-
-## Status
-
-**Spec draft.** First product/engineering spec is in [`docs/SPEC.md`](docs/SPEC.md) for review. No runtime yet.
-
-## Configuration (preview)
-
-Expected knobs once implemented:
-
-| Variable / setting | Description |
-|--------------------|-------------|
-| API listen URL/port | Where the glasses (or a tunnel) will reach the bridge |
-| API bearer token | Same value configured as **Token** on the glasses |
-| Telegram session | User account credentials/session used to talk to the agent |
-| Agent target | Bot username or chat id of your Telegram agent |
-| Reply timeout | Max time to wait for the agent before failing the completion |
-
-Exact names and formats will be fixed in the specs.
-
-## Repo
+Every message sent to Telegram is prefixed with:
 
 ```text
-completion-telegram-bridge/
-├── README.md          # this file
-├── docs/
-│   └── SPEC.md        # v0.1 product & protocol spec (draft)
-└── (code TBD)
+[sent from Even Realities G2, answer fast and concise]
+
+<your prompt>
 ```
+
+## Requirements
+
+- Python 3.11+
+- A Linux (or macOS) server with a public IP (or any host nginx can reach)
+- Telegram API credentials from [my.telegram.org](https://my.telegram.org)
+- Your personal Telegram account (user session — not the agent bot token)
+- nginx + TLS certificate for public HTTPS (recommended)
+
+**No Docker.** Install with pip, run a process, put nginx in front.
+
+## Install
+
+```bash
+# on the server
+python3 -m venv ~/venvs/ctb
+source ~/venvs/ctb/bin/activate
+pip install -U pip
+pip install git+https://github.com/matsei-ruka/completion-telegram-bridge.git
+
+# or from a clone
+git clone https://github.com/matsei-ruka/completion-telegram-bridge.git
+cd completion-telegram-bridge
+pip install -e .
+```
+
+CLI entrypoint: **`ctb`** (also `python -m completion_telegram_bridge`).
+
+Config and session live under:
+
+```text
+~/.config/completion-telegram-bridge/
+  config.json
+  telegram.session
+```
+
+Override directory with `CTB_CONFIG_DIR`.
+
+## Setup (CLI)
+
+```bash
+# 1. Telegram app credentials (my.telegram.org)
+ctb set-api
+
+# 2. Log in with your user account (phone + code + optional 2FA)
+ctb login
+
+# 3. List bots you already chat with, then pick the agent
+ctb agents
+ctb select-agent
+# or directly:
+ctb select-agent @YourAgentBot
+
+# 4. API token for Even Hub (generate a strong one)
+ctb set-token --generate
+
+# 5. Optional: bind address/port (default 127.0.0.1:8787)
+ctb config set port 8787
+ctb config set host 127.0.0.1
+
+# 6. Check readiness
+ctb status
+
+# 7. Run
+ctb serve
+```
+
+Other commands:
+
+| Command | Purpose |
+|---------|---------|
+| `ctb config` | Show config (secrets redacted) |
+| `ctb config set <key> <value>` | Set a scalar setting |
+| `ctb set-token` | Set/replace Bearer token |
+| `ctb logout` | Delete local Telegram session |
+| `ctb version` | Package version |
+
+## Even Hub (glasses) configuration
+
+| Field | Value |
+|-------|--------|
+| **Name** | e.g. `My Telegram Agent` |
+| **URL** | `https://bridge.example.com/v1` (or full `…/v1/chat/completions`) |
+| **Token** | Same string as `ctb set-token` |
+
+The service accepts:
+
+- `POST /v1/chat/completions`
+- `POST /` (alias)
+- `GET /v1/models` (auth required)
+- `GET /healthz` (no auth)
+
+## nginx (HTTPS on 443)
+
+Listen on localhost only for the app; terminate TLS in nginx.
+
+```nginx
+# /etc/nginx/sites-available/completion-telegram-bridge
+server {
+    listen 443 ssl http2;
+    server_name bridge.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/bridge.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bridge.example.com/privkey.pem;
+
+    # Completions can wait on Telegram for a while
+    proxy_read_timeout  120s;
+    proxy_send_timeout  120s;
+
+    location / {
+        proxy_pass         http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Enable site, obtain cert (e.g. certbot), reload nginx.
+
+### systemd (optional)
+
+```ini
+# /etc/systemd/system/ctb.service
+[Unit]
+Description=completion-telegram-bridge
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER
+Environment=CTB_CONFIG_DIR=/home/YOUR_USER/.config/completion-telegram-bridge
+ExecStart=/home/YOUR_USER/venvs/ctb/bin/ctb serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ctb
+```
+
+## Smoke test
+
+```bash
+curl -s http://127.0.0.1:8787/healthz
+
+curl -s -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"telegram-agent","messages":[{"role":"user","content":"ping"}]}' \
+  http://127.0.0.1:8787/v1/chat/completions
+```
+
+## Behaviour notes
+
+- Uses your **Telegram user** session to DM the selected bot.
+- Holds the HTTP request open until the bot replies (or timeout, default 45s).
+- Multi-bubble bot replies are concatenated after a short quiet period.
+- Only one completion at a time (`429` if busy).
+- Streaming is not supported (`400`).
+
+## Spec
+
+See [`docs/SPEC.md`](docs/SPEC.md).
 
 ## License
 
-TBD.
+MIT (see package metadata).
