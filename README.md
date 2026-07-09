@@ -47,7 +47,7 @@ Keeping the completion request open for the full round-trip matches how Even AI�
 
 ## Status
 
-**Bootstrap.** Specs and implementation plans come next. No runtime yet.
+**Spec draft.** First product/engineering spec is in [`docs/SPEC.md`](docs/SPEC.md) for review. No runtime yet.
 
 ## Configuration (preview)
 
@@ -68,7 +68,9 @@ Exact names and formats will be fixed in the specs.
 ```text
 completion-telegram-bridge/
 ├── README.md          # this file
-└── (specs & code TBD)
+├── docs/
+│   └── SPEC.md        # v0.1 product & protocol spec (draft)
+└── (code TBD)
 ```
 
 ## License
