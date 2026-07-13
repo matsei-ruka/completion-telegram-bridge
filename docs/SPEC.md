@@ -1,7 +1,7 @@
-# Spec: completion-telegram-bridge (v0.2)
+# Spec: completion-telegram-bridge (v0.3)
 
 **Status:** approved for implementation  
-**Date:** 2026-07-09  
+**Date:** 2026-07-13 (v0.3 adds voice; v0.2 approved 2026-07-09)  
 **Audience:** product + implementation (single-operator personal bridge)
 
 Bridge that exposes an OpenAI-compatible chat completions HTTP API for Even Realities G2 custom agents, and fulfills each request by messaging a Telegram agent from the operator’s own Telegram account, waiting for the reply, and returning it as a completion.
@@ -94,9 +94,54 @@ bridge returns OpenAI-shaped completion
 - `stream: true` → `400`.
 - Other OpenAI fields accepted and ignored.
 
+**Voice (v0.3)** — same route, standard OpenAI audio shape:
+
+```json
+{
+  "modalities": ["text", "audio"],
+  "audio": { "voice": "alloy", "format": "opus" },
+  "messages": [{
+    "role": "user",
+    "content": [{
+      "type": "input_audio",
+      "input_audio": { "data": "<base64>", "format": "ogg" }
+    }]
+  }]
+}
+```
+
+- `input_audio.format` must be `ogg` or `opus` (OGG/Opus): the bridge forwards the audio to Telegram **without transcoding**, and Telegram renders a voice note only for OGG/Opus. This is the single deliberate extension over the OpenAI enum (`wav|mp3`).
+- Decoded audio hard limit: 10 MB. One `input_audio` part per request.
+- `modalities` containing `"audio"` selects voice-reply semantics (§5.7). The `audio` output config is accepted but ignored — replies are always the agent's OGG/Opus voice note.
+- Text parts may accompany the audio; they become the voice note caption after the G2 marker.
+
 ### 4.4 Response (success)
 
 Standard non-streaming `chat.completion` JSON, `choices[0].message.content` = agent reply text. Token usage may be zeros.
+
+**Voice (v0.3)** — when a voice note is returned, standard OpenAI audio-output shape:
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "audio": {
+        "id": "audio_…",
+        "data": "<base64 OGG/Opus>",
+        "transcript": "agent text, if any",
+        "expires_at": 1752403200
+      }
+    },
+    "finish_reason": "stop"
+  }]
+}
+```
+
+- `transcript` = the agent's text messages/caption aggregated (the agent sends the same text it speaks).
+- `expires_at` is advisory (now + 15 min): audio is inline, nothing is stored server-side.
+- If the agent never sends a voice note within the timeout but did send text, the bridge degrades to a plain text completion (`content` set, no `audio`).
 
 ### 4.5 Errors
 
@@ -158,6 +203,28 @@ An inbound message is a reply if all hold:
 
 - Single-flight: second concurrent completion → `429`.
 - `reply_timeout_sec` default `45` → `504` on expiry.
+
+### 5.7 Voice notes (v0.3)
+
+The bridge is pure transport: no ASR, no TTS, no transcoding.
+
+**Outbound.** `input_audio` bytes are sent as a real Telegram voice note
+(`send_file(..., voice_note=True)`) from the operator's user account. The G2 marker
+(and any text parts) become the caption, truncated to Telegram's 1024-char limit.
+
+**Inbound — the voice note closes the reply.** When the request has
+`modalities: ["…", "audio"]`:
+
+1. Agent text arriving before the voice note is accumulated as transcript and never
+   ends the wait (interim/status messages are harmless).
+2. The first qualifying voice note ends the wait immediately — no quiet window.
+   Its caption joins the transcript. The file is downloaded via Telethon and returned
+   inline as base64.
+3. On `reply_timeout_sec` expiry with accumulated text: return a text-only completion
+   (degraded, no error). With nothing: `504`.
+
+Requests without audio modality keep the §5.5 text semantics unchanged (voice notes
+are ignored except their caption text, as before).
 
 ---
 
@@ -268,7 +335,10 @@ Interactive prompts are preferred for setup; non-interactive flags where practic
 | Streaming | Unsupported (`400`) |
 | Concurrency | Single-flight (`429`) |
 | Timeout | `504` |
+| Voice API shape (v0.3) | 100% OpenAI chat-completions audio: `input_audio` base64 in, `message.audio {id,data,transcript,expires_at}` out — no custom routes, no multipart, no media URLs |
+| Voice input format (v0.3) | OGG/Opus only (`format: "ogg"|"opus"`); sole extension over OpenAI's `wav|mp3` enum — bridge never transcodes |
+| Voice reply end (v0.3) | Agent's voice note closes the reply; interim text = transcript; timeout with text → degraded text completion |
 
 ---
 
-*v0.2 — implementation proceeds from this document.*
+*v0.3 — implementation proceeds from this document.*

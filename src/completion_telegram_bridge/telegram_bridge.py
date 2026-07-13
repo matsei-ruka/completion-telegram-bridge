@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from dataclasses import dataclass, field
 
 from telethon import TelegramClient, events
-from telethon.tl.types import User
+from telethon.tl.types import DocumentAttributeAudio, User
 
-from completion_telegram_bridge.config import BridgeConfig, format_outbound_message
+from completion_telegram_bridge.config import (
+    BridgeConfig,
+    format_outbound_message,
+    format_voice_caption,
+)
 from completion_telegram_bridge.logging_setup import DEBUG_BODIES, preview_text
 
 logger = logging.getLogger(__name__)
@@ -25,12 +30,32 @@ class BotDialog:
 
 
 @dataclass
+class ReplyAudio:
+    """Voice note received from the agent, downloaded from Telegram."""
+
+    data: bytes
+    mime_type: str = "audio/ogg"
+    duration_ms: int | None = None
+
+
+@dataclass
+class BridgeReply:
+    """Aggregated agent reply: text chunks plus optional voice note."""
+
+    text: str
+    audio: ReplyAudio | None = None
+
+
+@dataclass
 class _PendingWait:
     agent_id: int
     after_message_id: int
     req_id: str = "-"
+    want_audio: bool = False
     chunks: list[str] = field(default_factory=list)
     first_received: asyncio.Event = field(default_factory=asyncio.Event)
+    voice_received: asyncio.Event = field(default_factory=asyncio.Event)
+    voice_msg: object | None = None
     last_message_at: float = 0.0
     done: asyncio.Event = field(default_factory=asyncio.Event)
     error: Exception | None = None
@@ -157,6 +182,23 @@ class TelegramBridge:
                 )
                 return
             text = _message_text(msg)
+            voice = getattr(msg, "voice", None)
+            if voice is not None and pending.want_audio:
+                if text:
+                    # caption travels with the voice note; it is also the transcript
+                    pending.chunks.append(text)
+                pending.voice_msg = msg
+                pending.last_message_at = time.monotonic()
+                pending.first_received.set()
+                pending.voice_received.set()
+                logger.info(
+                    "tg agent voice req=%s msg_id=%s mime=%s caption_chars=%d",
+                    pending.req_id,
+                    msg.id,
+                    getattr(voice, "mime_type", "?"),
+                    len(text),
+                )
+                return
             if not text:
                 logger.info(
                     "tg agent media/empty msg_id=%s req=%s (waiting for text)",
@@ -183,8 +225,15 @@ class TelegramBridge:
             pending.error = exc
             pending.done.set()
 
-    async def complete(self, user_prompt: str, req_id: str = "-") -> str:
-        """Send prompt to agent and return aggregated reply text."""
+    async def complete(
+        self,
+        user_prompt: str,
+        *,
+        voice: bytes | None = None,
+        want_audio: bool = False,
+        req_id: str = "-",
+    ) -> BridgeReply:
+        """Send prompt (text and/or voice note) to agent and return aggregated reply."""
         if self._lock.locked():
             logger.warning("tg busy req=%s (another completion in flight)", req_id)
             raise BusyError("Another completion is already in progress")
@@ -196,32 +245,60 @@ class TelegramBridge:
             logger.warning("tg busy req=%s (lock timeout)", req_id)
             raise BusyError("Another completion is already in progress") from exc
         try:
-            return await self._complete_locked(user_prompt, req_id=req_id)
+            return await self._complete_locked(
+                user_prompt, voice=voice, want_audio=want_audio, req_id=req_id
+            )
         finally:
             if acquired:
                 self._lock.release()
 
-    async def _complete_locked(self, user_prompt: str, req_id: str = "-") -> str:
+    async def _complete_locked(
+        self,
+        user_prompt: str,
+        *,
+        voice: bytes | None = None,
+        want_audio: bool = False,
+        req_id: str = "-",
+    ) -> BridgeReply:
         agent = await self.resolve_agent_entity()
         agent_id = agent.id
         agent_label = getattr(agent, "username", None) or str(agent_id)
-        outbound = format_outbound_message(user_prompt)
 
-        logger.info(
-            "tg send start req=%s agent=@%s id=%s outbound_chars=%d",
-            req_id,
-            agent_label,
-            agent_id,
-            len(outbound),
-        )
-        if DEBUG_BODIES:
-            logger.debug("tg send full req=%s:\n%s", req_id, outbound)
-
-        try:
-            sent = await self._client.send_message(agent, outbound)
-        except Exception:
-            logger.exception("tg send failed req=%s agent=%s", req_id, agent_id)
-            raise
+        if voice is not None:
+            caption = format_voice_caption(user_prompt)
+            logger.info(
+                "tg send voice start req=%s agent=@%s id=%s voice_bytes=%d caption_chars=%d",
+                req_id,
+                agent_label,
+                agent_id,
+                len(voice),
+                len(caption),
+            )
+            voice_file = io.BytesIO(voice)
+            voice_file.name = "voice.ogg"
+            try:
+                sent = await self._client.send_file(
+                    agent, voice_file, voice_note=True, caption=caption
+                )
+            except Exception:
+                logger.exception("tg send voice failed req=%s agent=%s", req_id, agent_id)
+                raise
+        else:
+            outbound = format_outbound_message(user_prompt)
+            logger.info(
+                "tg send start req=%s agent=@%s id=%s outbound_chars=%d",
+                req_id,
+                agent_label,
+                agent_id,
+                len(outbound),
+            )
+            if DEBUG_BODIES:
+                logger.debug("tg send full req=%s:\n%s", req_id, outbound)
+            try:
+                sent = await self._client.send_message(agent, outbound)
+            except Exception:
+                logger.exception("tg send failed req=%s agent=%s", req_id, agent_id)
+                raise
 
         after_id = sent.id
         logger.info(
@@ -233,7 +310,12 @@ class TelegramBridge:
             preview_text(user_prompt),
         )
 
-        pending = _PendingWait(agent_id=agent_id, after_message_id=after_id, req_id=req_id)
+        pending = _PendingWait(
+            agent_id=agent_id,
+            after_message_id=after_id,
+            req_id=req_id,
+            want_audio=want_audio,
+        )
         self._pending = pending
         timeout = float(self.config.reply_timeout_sec)
         quiet = float(self.config.reply_quiet_ms) / 1000.0
@@ -250,6 +332,9 @@ class TelegramBridge:
 
         wait_started = time.monotonic()
         try:
+            if want_audio:
+                return await self._wait_for_voice(pending, timeout, wait_started)
+
             try:
                 await asyncio.wait_for(pending.first_received.wait(), timeout=timeout)
             except asyncio.TimeoutError as exc:
@@ -296,9 +381,75 @@ class TelegramBridge:
             )
             if DEBUG_BODIES:
                 logger.debug("tg reply full req=%s:\n%s", req_id, reply)
-            return reply
+            return BridgeReply(text=reply)
         finally:
             self._pending = None
+
+    async def _wait_for_voice(
+        self, pending: _PendingWait, timeout: float, wait_started: float
+    ) -> BridgeReply:
+        """Voice mode: the agent's voice note closes the reply (SPEC §5.7).
+
+        Text arriving before the voice note is accumulated as transcript and never
+        ends the wait. On timeout, accumulated text is returned as a degraded
+        text-only reply instead of failing.
+        """
+        req_id = pending.req_id
+        try:
+            await asyncio.wait_for(pending.voice_received.wait(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            if pending.error:
+                raise pending.error
+            text = "\n\n".join(pending.chunks).strip()
+            waited = int((time.monotonic() - wait_started) * 1000)
+            if text:
+                logger.warning(
+                    "tg voice fallback req=%s waited_ms=%d: no voice note, returning %d text chars",
+                    req_id,
+                    waited,
+                    len(text),
+                )
+                return BridgeReply(text=text)
+            logger.error(
+                "tg voice timeout req=%s waited_ms=%d (no reply at all)", req_id, waited
+            )
+            raise ReplyTimeoutError(
+                f"Timed out after {self.config.reply_timeout_sec}s waiting for Telegram agent voice reply"
+            ) from exc
+
+        if pending.error:
+            raise pending.error
+
+        msg = pending.voice_msg
+        data = await self._client.download_media(msg, file=bytes)
+        if not data:
+            raise RuntimeError("Agent voice note could not be downloaded")
+
+        voice_doc = getattr(msg, "voice", None)
+        mime = getattr(voice_doc, "mime_type", None) or "audio/ogg"
+        duration_ms: int | None = None
+        for attr in getattr(voice_doc, "attributes", None) or []:
+            if isinstance(attr, DocumentAttributeAudio) and attr.duration:
+                duration_ms = int(attr.duration * 1000)
+                break
+
+        text = "\n\n".join(pending.chunks).strip()
+        waited = int((time.monotonic() - wait_started) * 1000)
+        logger.info(
+            "tg voice reply ready req=%s audio_bytes=%d mime=%s duration_ms=%s text_chars=%d waited_ms=%d",
+            req_id,
+            len(data),
+            mime,
+            duration_ms,
+            len(text),
+            waited,
+        )
+        if DEBUG_BODIES and text:
+            logger.debug("tg voice transcript full req=%s:\n%s", req_id, text)
+        return BridgeReply(
+            text=text,
+            audio=ReplyAudio(data=data, mime_type=mime, duration_ms=duration_ms),
+        )
 
 
 def _message_text(msg) -> str:

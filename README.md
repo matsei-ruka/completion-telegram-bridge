@@ -107,6 +107,53 @@ The service accepts:
 - `GET /v1/models` (auth required)
 - `GET /healthz` (no auth)
 
+## Voice (OpenAI audio, v0.2+)
+
+The same completions route speaks the standard [OpenAI chat-completions audio shape](https://developers.openai.com/api/docs/guides/audio). The bridge stays pure transport: the audio is forwarded to the agent as a real Telegram voice note (no ASR/TTS, no transcoding), and the agent's voice note comes back inline as base64.
+
+Request (audio must be **OGG/Opus** — the only format Telegram renders as a voice note; this is the single extension over OpenAI's `wav|mp3` input enum):
+
+```json
+{
+  "model": "telegram-agent",
+  "modalities": ["text", "audio"],
+  "messages": [{
+    "role": "user",
+    "content": [{
+      "type": "input_audio",
+      "input_audio": { "data": "<base64 OGG/Opus>", "format": "ogg" }
+    }]
+  }]
+}
+```
+
+Response:
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "audio": {
+        "id": "audio_…",
+        "data": "<base64 OGG/Opus>",
+        "transcript": "agent text, if any",
+        "expires_at": 1752403200
+      }
+    }
+  }]
+}
+```
+
+Semantics:
+
+- `modalities: ["text", "audio"]` = wait for the agent's **voice note**; it closes the reply immediately (no quiet window). Interim text messages are collected into `transcript` and never end the wait.
+- Voice note caption on the outbound message carries the G2 marker (+ any text parts).
+- If the timeout expires with only text received, the bridge returns a normal text completion instead of an error (degraded, no `audio` object).
+- Text-only clients (Even Hub / G2) are untouched: without `modalities: ["…","audio"]` everything behaves exactly as before.
+- Input limits: one `input_audio` part, 10 MB decoded max.
+
 ## nginx (HTTPS on 443)
 
 Listen on localhost only for the app; terminate TLS in nginx.
@@ -215,6 +262,7 @@ curl -s -H "Authorization: Bearer YOUR_TOKEN" \
 - Uses your **Telegram user** session to DM the selected bot.
 - Holds the HTTP request open until the bot replies (or timeout, default 45s).
 - Multi-bubble bot replies are concatenated after a short quiet period.
+- Voice requests (`modalities` includes `audio`): the agent's voice note ends the wait; text before it becomes the transcript.
 - Only one completion at a time (`429` if busy).
 - Streaming is not supported (`400`).
 

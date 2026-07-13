@@ -20,6 +20,18 @@ DEFAULT_REPLY_TIMEOUT_SEC = 45
 DEFAULT_REPLY_QUIET_MS = 800
 DEFAULT_REPLY_MAX_MESSAGES = 10
 
+# Voice input (OpenAI `input_audio` content parts).
+# The bridge forwards audio as-is; Telegram renders a voice note only for OGG/Opus,
+# so those are the only accepted input formats (no transcoding, SPEC §5.7).
+VOICE_INPUT_FORMATS = frozenset({"ogg", "opus"})
+# Telegram voice notes are ~3-4 KB/s Opus; this guards memory, not policy.
+MAX_VOICE_INPUT_BYTES = 10 * 1024 * 1024
+# Advisory `expires_at` on returned audio objects (data is inline, nothing is stored).
+AUDIO_EXPIRES_SEC = 900
+
+# Telegram caption hard limit.
+MAX_CAPTION_CHARS = 1024
+
 CONFIG_FILE_NAME = "config.json"
 SESSION_FILE_NAME = "telegram.session"
 
@@ -167,3 +179,11 @@ def coerce_config_value(key: str, value: str) -> Any:
 def format_outbound_message(user_prompt: str) -> str:
     prompt = user_prompt.strip()
     return f"{G2_MESSAGE_PREFIX}\n\n{prompt}"
+
+
+def format_voice_caption(user_prompt: str) -> str:
+    """Caption for outbound voice notes: marker, plus any text sent with the audio."""
+    prompt = user_prompt.strip()
+    if not prompt:
+        return G2_MESSAGE_PREFIX
+    return format_outbound_message(prompt)[:MAX_CAPTION_CHARS]

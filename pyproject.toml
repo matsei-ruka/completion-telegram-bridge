@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "completion-telegram-bridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenAI-compatible completion API bridge to a personal Telegram agent for Even Realities G2"
 readme = "README.md"
 requires-python = ">=3.11"

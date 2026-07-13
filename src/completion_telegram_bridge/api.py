@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -16,7 +19,12 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from completion_telegram_bridge import __version__
-from completion_telegram_bridge.config import BridgeConfig
+from completion_telegram_bridge.config import (
+    AUDIO_EXPIRES_SEC,
+    MAX_VOICE_INPUT_BYTES,
+    VOICE_INPUT_FORMATS,
+    BridgeConfig,
+)
 from completion_telegram_bridge.logging_setup import DEBUG_BODIES, preview_text, redact_auth_header
 from completion_telegram_bridge.telegram_bridge import BusyError, ReplyTimeoutError, TelegramBridge
 
@@ -32,10 +40,53 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage] = Field(default_factory=list)
     stream: bool | None = False
+    # OpenAI audio extensions: modalities selects audio output; `audio` is the
+    # output config (voice/format) — accepted but replies are always Telegram OGG/Opus.
+    modalities: list[str] | None = None
+    audio: dict[str, Any] | None = None
     model_config = {"extra": "allow"}
 
 
-def extract_user_text(messages: list[ChatMessage]) -> str:
+class VoiceInputError(ValueError):
+    """Invalid `input_audio` content part; message is safe to return to the client."""
+
+
+@dataclass
+class UserContent:
+    text: str
+    voice: bytes | None = None
+
+
+def _decode_input_audio(part: dict[str, Any], existing: bytes | None) -> bytes:
+    if existing is not None:
+        raise VoiceInputError("Only one input_audio part per request is supported")
+    payload = part.get("input_audio")
+    if not isinstance(payload, dict):
+        raise VoiceInputError("input_audio part must contain an 'input_audio' object")
+    fmt = str(payload.get("format", "")).lower()
+    if fmt not in VOICE_INPUT_FORMATS:
+        raise VoiceInputError(
+            f"Unsupported input_audio format {fmt!r}: the bridge forwards audio without "
+            "transcoding, send OGG/Opus (format 'ogg' or 'opus')"
+        )
+    data = payload.get("data")
+    if not data or not isinstance(data, str):
+        raise VoiceInputError("input_audio.data must be a non-empty base64 string")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise VoiceInputError("input_audio.data is not valid base64") from exc
+    if not raw:
+        raise VoiceInputError("input_audio.data decodes to zero bytes")
+    if len(raw) > MAX_VOICE_INPUT_BYTES:
+        raise VoiceInputError(
+            f"input_audio exceeds the {MAX_VOICE_INPUT_BYTES} byte limit"
+        )
+    return raw
+
+
+def extract_user_content(messages: list[ChatMessage]) -> UserContent:
+    """Latest user message's text and/or voice input."""
     for msg in reversed(messages):
         if msg.role != "user":
             continue
@@ -45,22 +96,32 @@ def extract_user_text(messages: list[ChatMessage]) -> str:
         if isinstance(content, str):
             text = content.strip()
             if text:
-                return text
+                return UserContent(text=text)
             continue
         if isinstance(content, list):
             parts: list[str] = []
+            voice: bytes | None = None
             for part in content:
                 if isinstance(part, str):
                     parts.append(part)
                 elif isinstance(part, dict):
-                    if part.get("type") == "text" and part.get("text"):
+                    if part.get("type") == "input_audio":
+                        voice = _decode_input_audio(part, voice)
+                    elif part.get("type") == "text" and part.get("text"):
                         parts.append(str(part["text"]))
                     elif "text" in part and part["text"]:
                         parts.append(str(part["text"]))
             joined = "\n".join(p.strip() for p in parts if p and str(p).strip()).strip()
-            if joined:
-                return joined
-    raise ValueError("No user message with text content found")
+            if joined or voice is not None:
+                return UserContent(text=joined, voice=voice)
+    raise ValueError("No user message with text or audio content found")
+
+
+def extract_user_text(messages: list[ChatMessage]) -> str:
+    content = extract_user_content(messages)
+    if not content.text:
+        raise ValueError("No user message with text content found")
+    return content.text
 
 
 def _err(message: str, type_: str, code: str) -> dict[str, Any]:
@@ -235,7 +296,13 @@ def create_app(config: BridgeConfig, bridge: TelegramBridge) -> FastAPI:
                 detail=_err("messages is required", "invalid_request_error", "invalid_messages"),
             )
         try:
-            user_text = extract_user_text(body.messages)
+            user = extract_user_content(body.messages)
+        except VoiceInputError as exc:
+            logger.warning("invalid audio input id=%s err=%s", req_id, exc)
+            raise HTTPException(
+                status_code=400,
+                detail=_err(str(exc), "invalid_request_error", "invalid_audio"),
+            ) from exc
         except ValueError as exc:
             logger.warning("invalid messages id=%s err=%s", req_id, exc)
             raise HTTPException(
@@ -243,21 +310,27 @@ def create_app(config: BridgeConfig, bridge: TelegramBridge) -> FastAPI:
                 detail=_err(str(exc), "invalid_request_error", "invalid_messages"),
             ) from exc
 
+        want_audio = "audio" in [m.lower() for m in (body.modalities or [])]
         model = body.model or config.model_id or "telegram-agent"
         logger.info(
-            "completion start id=%s model=%s messages=%d prompt_chars=%d prompt=%r",
+            "completion start id=%s model=%s messages=%d prompt_chars=%d voice_bytes=%s "
+            "want_audio=%s prompt=%r",
             req_id,
             model,
             len(body.messages),
-            len(user_text),
-            preview_text(user_text),
+            len(user.text),
+            len(user.voice) if user.voice is not None else 0,
+            want_audio,
+            preview_text(user.text),
         )
-        if DEBUG_BODIES:
-            logger.debug("completion full prompt id=%s:\n%s", req_id, user_text)
+        if DEBUG_BODIES and user.text:
+            logger.debug("completion full prompt id=%s:\n%s", req_id, user.text)
 
         started = time.monotonic()
         try:
-            reply = await bridge.complete(user_text, req_id=req_id)
+            reply = await bridge.complete(
+                user.text, voice=user.voice, want_audio=want_audio, req_id=req_id
+            )
         except BusyError as exc:
             logger.warning("completion busy id=%s", req_id)
             raise HTTPException(
@@ -280,16 +353,33 @@ def create_app(config: BridgeConfig, bridge: TelegramBridge) -> FastAPI:
         elapsed_ms = int((time.monotonic() - started) * 1000)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         logger.info(
-            "completion ok id=%s completion_id=%s model=%s elapsed_ms=%d reply_chars=%d reply=%r",
+            "completion ok id=%s completion_id=%s model=%s elapsed_ms=%d reply_chars=%d "
+            "audio_bytes=%s reply=%r",
             req_id,
             completion_id,
             model,
             elapsed_ms,
-            len(reply),
-            preview_text(reply),
+            len(reply.text),
+            len(reply.audio.data) if reply.audio is not None else 0,
+            preview_text(reply.text),
         )
-        if DEBUG_BODIES:
-            logger.debug("completion full reply id=%s:\n%s", req_id, reply)
+        if DEBUG_BODIES and reply.text:
+            logger.debug("completion full reply id=%s:\n%s", req_id, reply.text)
+
+        if reply.audio is not None:
+            # OpenAI audio-output shape: content null, audio holds data + transcript
+            message: dict[str, Any] = {
+                "role": "assistant",
+                "content": None,
+                "audio": {
+                    "id": f"audio_{uuid.uuid4().hex[:24]}",
+                    "data": base64.b64encode(reply.audio.data).decode("ascii"),
+                    "transcript": reply.text,
+                    "expires_at": int(time.time()) + AUDIO_EXPIRES_SEC,
+                },
+            }
+        else:
+            message = {"role": "assistant", "content": reply.text}
 
         return {
             "id": completion_id,
@@ -299,7 +389,7 @@ def create_app(config: BridgeConfig, bridge: TelegramBridge) -> FastAPI:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": reply},
+                    "message": message,
                     "finish_reason": "stop",
                 }
             ],
