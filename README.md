@@ -1,16 +1,16 @@
 # completion-telegram-bridge
 
-Bridge an [Even Realities G2](https://www.evenrealities.com/) custom agent (OpenAI-compatible completion API) to a personal agent that lives on Telegram.
+Bridge an OpenAI-compatible custom agent — [Even Realities G2](https://www.evenrealities.com/) glasses or an Android assistant app — to a personal agent that lives on Telegram.
 
 ```
-Even Realities G2  →  HTTPS (nginx)  →  this service  →  Telegram  →  your agent bot
-                                              ←  wait for reply  ←
+client (G2 / Android)  →  HTTPS (nginx)  →  this service  →  Telegram  →  your agent bot
+                                                  ←  wait for reply  ←
 ```
 
-Every message sent to Telegram is prefixed with:
+Every message sent to Telegram is prefixed with a generic client-agnostic marker:
 
 ```text
-[sent from Even Realities G2, answer fast and concise]
+[sent from personal assistant, answer fast and concise]
 
 <your prompt>
 ```
@@ -149,7 +149,7 @@ Response:
 Semantics:
 
 - `modalities: ["text", "audio"]` = wait for the agent's **voice note**; it closes the reply immediately (no quiet window). Interim text messages are collected into `transcript` and never end the wait.
-- Voice note caption on the outbound message carries the G2 marker (+ any text parts).
+- Voice note caption on the outbound message carries the generic marker (+ any text parts).
 - If the timeout expires with only text received, the bridge returns a normal text completion instead of an error (degraded, no `audio` object).
 - Text-only clients (Even Hub / G2) are untouched: without `modalities: ["…","audio"]` everything behaves exactly as before.
 - Input limits: one `input_audio` part, 10 MB decoded max.

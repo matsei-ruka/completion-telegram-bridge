@@ -14,7 +14,8 @@ Authoritative design doc: `docs/SPEC.md`. Read it before changing behaviour.
 - `src/completion_telegram_bridge/telegram_bridge.py` — Telethon client, single-flight
   lock, reply wait/aggregation (`BridgeReply`), voice note send/receive
 - `src/completion_telegram_bridge/config.py` — pydantic config + product constants
-  (G2 marker, timeouts, voice limits), stored at `~/.config/completion-telegram-bridge/`
+  (generic outbound marker `BRIDGE_MESSAGE_PREFIX`, timeouts, voice limits), stored at
+  `~/.config/completion-telegram-bridge/`
 - `src/completion_telegram_bridge/cli.py` — `ctb` typer CLI (login, select-agent, serve…)
 - `src/completion_telegram_bridge/server.py` / `logging_setup.py` — uvicorn entry, logging
 

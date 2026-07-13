@@ -15,7 +15,14 @@ from completion_telegram_bridge.api import (
     create_app,
     extract_user_content,
 )
-from completion_telegram_bridge.config import G2_MESSAGE_PREFIX, BridgeConfig
+from completion_telegram_bridge.config import (
+    BRIDGE_MESSAGE_PREFIX,
+    BridgeConfig,
+    format_voice_caption,
+)
+
+# Generic marker shared by all clients (G2 glasses + Android assistant app).
+EXPECTED_PREFIX = "[sent from personal assistant, answer fast and concise]"
 from completion_telegram_bridge.telegram_bridge import (
     BridgeReply,
     ReplyAudio,
@@ -34,6 +41,21 @@ def audio_part(data: str = OGG_B64, fmt: str = "ogg") -> dict:
 
 def user_msg(content) -> ChatMessage:
     return ChatMessage(role="user", content=content)
+
+
+# ---------------------------------------------------------------- caption
+
+
+def test_voice_caption_uses_generic_prefix_when_empty():
+    assert BRIDGE_MESSAGE_PREFIX == EXPECTED_PREFIX
+    assert format_voice_caption("   ") == EXPECTED_PREFIX
+
+
+def test_voice_caption_prepends_generic_prefix_to_text():
+    caption = format_voice_caption("  ciao  ")
+    assert caption.startswith(EXPECTED_PREFIX)
+    # Prefix + blank line + text contract, same as the text transport.
+    assert caption == f"{EXPECTED_PREFIX}\n\nciao"
 
 
 # ---------------------------------------------------------------- extraction

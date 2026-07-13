@@ -40,7 +40,7 @@ bridge returns OpenAI-shaped completion
 
 1. Accept authenticated chat-completion HTTP requests compatible with Even Realities G2 custom agent configuration.
 2. Extract the latest user utterance from the request.
-3. Prefix every outbound Telegram message with a fixed G2 marker (see §5.5).
+3. Prefix every outbound Telegram message with a fixed generic marker (see §5.5).
 4. Send that text to a configured Telegram agent (bot) **using the operator’s Telegram user account** (user API / MTProto), not the agent’s bot token.
 5. Keep the HTTP request open until a matching agent reply arrives or a timeout elapses.
 6. Return the agent’s text reply as an OpenAI-compatible non-streaming chat completion.
@@ -113,7 +113,7 @@ bridge returns OpenAI-shaped completion
 - `input_audio.format` must be `ogg` or `opus` (OGG/Opus): the bridge forwards the audio to Telegram **without transcoding**, and Telegram renders a voice note only for OGG/Opus. This is the single deliberate extension over the OpenAI enum (`wav|mp3`).
 - Decoded audio hard limit: 10 MB. One `input_audio` part per request.
 - `modalities` containing `"audio"` selects voice-reply semantics (§5.7). The `audio` output config is accepted but ignored — replies are always the agent's OGG/Opus voice note.
-- Text parts may accompany the audio; they become the voice note caption after the G2 marker.
+- Text parts may accompany the audio; they become the voice note caption after the generic marker.
 
 ### 4.4 Response (success)
 
@@ -181,12 +181,13 @@ Standard non-streaming `chat.completion` JSON, `choices[0].message.content` = ag
 Every message sent to the agent **must** start with this exact prefix line, then a blank line, then the user prompt:
 
 ```
-[sent from Even Realities G2, answer fast and concise]
+[sent from personal assistant, answer fast and concise]
 
 <user prompt text>
 ```
 
-The fixed prefix is a product constant (not user-editable in v1).
+The fixed prefix is a product constant (not user-editable in v1). It is generic
+across clients (Even Realities G2 glasses and the Android assistant app).
 
 ### 5.5 Reply matching
 
@@ -209,7 +210,7 @@ An inbound message is a reply if all hold:
 The bridge is pure transport: no ASR, no TTS, no transcoding.
 
 **Outbound.** `input_audio` bytes are sent as a real Telegram voice note
-(`send_file(..., voice_note=True)`) from the operator's user account. The G2 marker
+(`send_file(..., voice_note=True)`) from the operator's user account. The generic marker
 (and any text parts) become the caption, truncated to Telegram's 1024-char limit.
 
 **Inbound — the voice note closes the reply.** When the request has
@@ -314,7 +315,7 @@ Interactive prompts are preferred for setup; non-interactive flags where practic
 - [ ] Installable as a Python package; CLI entrypoint works.
 - [ ] CLI can set api credentials, log in to Telegram, list bots, select agent, set API token, configure host/port/timeouts.
 - [ ] `ctb serve` serves healthz + chat completions.
-- [ ] Outbound Telegram messages use the fixed G2 prefix + blank line + prompt.
+- [ ] Outbound Telegram messages use the fixed generic prefix + blank line + prompt.
 - [ ] Agent reply returned as OpenAI chat.completion.
 - [ ] Multi-bubble aggregation + single-flight + timeout behaviour as specified.
 - [ ] Documented nginx HTTPS reverse-proxy setup (no Docker).
@@ -329,7 +330,7 @@ Interactive prompts are preferred for setup; non-interactive flags where practic
 | Containers | **No Docker** |
 | Deploy | Python process + nginx HTTPS on 443 |
 | Config UX | CLI-first under `~/.config/completion-telegram-bridge/` |
-| Outbound prefix | `[sent from Even Realities G2, answer fast and concise]` + blank line |
+| Outbound prefix | `[sent from personal assistant, answer fast and concise]` + blank line |
 | Agent pick | CLI lists bots / select by username |
 | Stack | Python 3.11+, Telethon, FastAPI/uvicorn |
 | Streaming | Unsupported (`400`) |

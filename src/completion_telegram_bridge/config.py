@@ -11,7 +11,8 @@ from typing import Any
 from pydantic import BaseModel
 
 # Fixed product prefix on every outbound Telegram message (SPEC §5.4).
-G2_MESSAGE_PREFIX = "[sent from Even Realities G2, answer fast and concise]"
+# Generic across clients (Even Realities G2 glasses, Android assistant app).
+BRIDGE_MESSAGE_PREFIX = "[sent from personal assistant, answer fast and concise]"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -178,12 +179,12 @@ def coerce_config_value(key: str, value: str) -> Any:
 
 def format_outbound_message(user_prompt: str) -> str:
     prompt = user_prompt.strip()
-    return f"{G2_MESSAGE_PREFIX}\n\n{prompt}"
+    return f"{BRIDGE_MESSAGE_PREFIX}\n\n{prompt}"
 
 
 def format_voice_caption(user_prompt: str) -> str:
     """Caption for outbound voice notes: marker, plus any text sent with the audio."""
     prompt = user_prompt.strip()
     if not prompt:
-        return G2_MESSAGE_PREFIX
+        return BRIDGE_MESSAGE_PREFIX
     return format_outbound_message(prompt)[:MAX_CAPTION_CHARS]
