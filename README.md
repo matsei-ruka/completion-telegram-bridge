@@ -167,9 +167,12 @@ server {
     ssl_certificate     /etc/letsencrypt/live/bridge.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/bridge.example.com/privkey.pem;
 
-    # Completions can wait on Telegram for a while
-    proxy_read_timeout  120s;
-    proxy_send_timeout  120s;
+    # 10 MB decoded audio expands to ~13.3 MB as Base64 JSON.
+    client_max_body_size 20m;
+
+    # Production waits up to 300s for Telegram; keep 30s proxy headroom.
+    proxy_read_timeout  330s;
+    proxy_send_timeout  330s;
 
     location / {
         proxy_pass         http://127.0.0.1:8787;

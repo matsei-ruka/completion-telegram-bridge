@@ -291,6 +291,8 @@ Interactive prompts are preferred for setup; non-interactive flags where practic
 - Server has a public IP and DNS name.
 - **nginx** (or equivalent) terminates TLS on **443** with a real certificate (e.g. Let’s Encrypt).
 - Reverse-proxy to `http://127.0.0.1:8787`.
+- Set `client_max_body_size 20m`: the 10 MB decoded audio limit expands to ~13.3 MB as Base64 JSON.
+- Set proxy read/send timeouts at least 30 seconds above `reply_timeout_sec` (production: `330s` for a `300s` reply timeout).
 - Even Hub URL: `https://bridge.example.com/v1` (or full path to chat completions, depending on app).
 - Token: same as `api_token` in config.
 
