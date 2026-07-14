@@ -64,6 +64,11 @@ class _PendingWait:
 class TelegramBridge:
     """Owns a Telethon client and single-flight completion waits."""
 
+    # A voice-capable agent may emit text shortly before its voice note. Give
+    # that note a small window to arrive, but never hold a text-only reply for
+    # the full completion timeout.
+    VOICE_TEXT_FALLBACK_GRACE_SEC = 10.0
+
     def __init__(self, config: BridgeConfig) -> None:
         self.config = config
         if not config.telegram_api_id or not config.telegram_api_hash:
@@ -388,18 +393,43 @@ class TelegramBridge:
     async def _wait_for_voice(
         self, pending: _PendingWait, timeout: float, wait_started: float
     ) -> BridgeReply:
-        """Voice mode: the agent's voice note closes the reply (SPEC §5.7).
+        """Prefer a voice note, but return text promptly when no voice follows.
 
-        Text arriving before the voice note is accumulated as transcript and never
-        ends the wait. On timeout, accumulated text is returned as a degraded
-        text-only reply instead of failing.
+        The first usable agent event opens the decision window. A voice note
+        closes immediately; text gets a short grace period for a following voice
+        note, then degrades to a text-only reply. With no event at all, the normal
+        completion timeout still applies.
         """
         req_id = pending.req_id
         try:
-            await asyncio.wait_for(pending.voice_received.wait(), timeout=timeout)
+            await asyncio.wait_for(pending.first_received.wait(), timeout=timeout)
         except asyncio.TimeoutError as exc:
             if pending.error:
                 raise pending.error
+            waited = int((time.monotonic() - wait_started) * 1000)
+            logger.error(
+                "tg voice timeout req=%s waited_ms=%d (no reply at all)", req_id, waited
+            )
+            raise ReplyTimeoutError(
+                f"Timed out after {self.config.reply_timeout_sec}s waiting for Telegram agent voice reply"
+            ) from exc
+
+        if pending.error:
+            raise pending.error
+
+        if not pending.voice_received.is_set():
+            remaining = max(0.0, timeout - (time.monotonic() - wait_started))
+            grace = min(self.VOICE_TEXT_FALLBACK_GRACE_SEC, remaining)
+            if grace > 0:
+                try:
+                    await asyncio.wait_for(pending.voice_received.wait(), timeout=grace)
+                except asyncio.TimeoutError:
+                    pass
+
+        if pending.error:
+            raise pending.error
+
+        if not pending.voice_received.is_set():
             text = "\n\n".join(pending.chunks).strip()
             waited = int((time.monotonic() - wait_started) * 1000)
             if text:
@@ -410,15 +440,7 @@ class TelegramBridge:
                     len(text),
                 )
                 return BridgeReply(text=text)
-            logger.error(
-                "tg voice timeout req=%s waited_ms=%d (no reply at all)", req_id, waited
-            )
-            raise ReplyTimeoutError(
-                f"Timed out after {self.config.reply_timeout_sec}s waiting for Telegram agent voice reply"
-            ) from exc
-
-        if pending.error:
-            raise pending.error
+            raise ReplyTimeoutError("Agent replied without usable voice or text")
 
         msg = pending.voice_msg
         data = await self._client.download_media(msg, file=bytes)

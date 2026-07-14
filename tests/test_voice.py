@@ -253,16 +253,39 @@ async def test_voice_note_closes_reply_and_keeps_interim_text():
     assert "ecco la risposta" in reply.text
 
 
-async def test_voice_timeout_falls_back_to_text():
+async def test_voice_text_reply_falls_back_after_short_grace():
     bridge = make_bridge()
+    bridge.VOICE_TEXT_FALLBACK_GRACE_SEC = 0.02
     pending = _PendingWait(agent_id=7, after_message_id=10, want_audio=True)
     bridge._pending = pending
 
+    wait = asyncio.create_task(
+        bridge._wait_for_voice(pending, timeout=1.0, wait_started=time.monotonic())
+    )
     await bridge._on_new_message(text_event(11, "solo testo, niente voce"))
 
-    reply = await bridge._wait_for_voice(pending, timeout=0.05, wait_started=time.monotonic())
+    reply = await asyncio.wait_for(wait, timeout=0.2)
     assert reply.audio is None
     assert reply.text == "solo testo, niente voce"
+
+
+async def test_voice_arriving_during_text_grace_wins():
+    bridge = make_bridge()
+    bridge.VOICE_TEXT_FALLBACK_GRACE_SEC = 0.1
+    pending = _PendingWait(agent_id=7, after_message_id=10, want_audio=True)
+    bridge._pending = pending
+
+    wait = asyncio.create_task(
+        bridge._wait_for_voice(pending, timeout=1.0, wait_started=time.monotonic())
+    )
+    await bridge._on_new_message(text_event(11, "testo preliminare"))
+    await asyncio.sleep(0.01)
+    await bridge._on_new_message(voice_event(12, caption="voce finale"))
+
+    reply = await asyncio.wait_for(wait, timeout=0.2)
+    assert reply.audio is not None
+    assert "testo preliminare" in reply.text
+    assert "voce finale" in reply.text
 
 
 async def test_voice_timeout_without_any_reply_raises():
